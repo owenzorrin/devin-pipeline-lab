@@ -1,6 +1,5 @@
 """Money helpers. Amounts are always stored as integer cents."""
 
-import os
 import re
 from decimal import ROUND_HALF_UP, Decimal
 
