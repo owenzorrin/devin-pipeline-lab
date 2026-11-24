@@ -1,0 +1,130 @@
+name: Auto-fix CI with Devin
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+permissions:
+  actions: read
+  pull-requests: write
+
+concurrency:
+  group: devin-ci-fix-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+env:
+  # Only failures in these steps of ci.yml are code problems Devin can fix.
+  # Setup failures (checkout, setup-python, pip install) and timeouts are skipped.
+  FIXABLE_STEPS: "Lint,Format check,Tests"
+  # Stop re-triggering after this many Devin attempts on the same PR.
+  MAX_ATTEMPTS: "2"
+  MARKER: "<!-- devin-ci-fix -->"
+
+jobs:
+  trigger-devin-fix:
+    if: >-
+      github.event.workflow_run.conclusion == 'failure' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Get failure details
+        id: failure
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const pr = run.pull_requests[0];
+            if (!pr) {
+              core.info('No PR associated with this run; skipping.');
+              core.setOutput('fixable', 'false');
+              return;
+            }
+
+            const fixable = process.env.FIXABLE_STEPS.split(',').map(s => s.trim());
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: run.id,
+            });
+            const failedJobs = jobs.filter(j => j.conclusion === 'failure');
+            const failedSteps = failedJobs.flatMap(j =>
+              (j.steps || [])
+                .filter(s => s.conclusion === 'failure')
+                .map(s => ({ job: j.name, step: s.name })));
+            const fixableSteps = failedSteps.filter(s => fixable.includes(s.step));
+            core.info(`Failed steps: ${JSON.stringify(failedSteps)}`);
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+            });
+            const attempts = comments.filter(c => c.body && c.body.includes(process.env.MARKER)).length;
+
+            let ok = fixableSteps.length > 0;
+            if (!ok) core.info('No fixable step failed (setup/infra failure); skipping.');
+            if (ok && attempts >= Number(process.env.MAX_ATTEMPTS)) {
+              core.info(`Already triggered Devin ${attempts} time(s) on PR #${pr.number}; skipping.`);
+              ok = false;
+            }
+
+            core.setOutput('fixable', String(ok));
+            core.setOutput('pr_number', pr.number);
+            core.setOutput('branch', run.head_branch);
+            core.setOutput('head_sha', run.head_sha);
+            core.setOutput('failed', fixableSteps.map(s => `${s.job} / ${s.step}`).join(', '));
+            core.setOutput('failed_jobs', failedJobs.map(j => j.name).join(', '));
+            core.setOutput('run_url', run.html_url);
+            core.setOutput('attempt', attempts + 1);
+
+      - name: Trigger Devin session
+        id: devin
+        if: steps.failure.outputs.fixable == 'true'
+        env:
+          DEVIN_API_KEY: ${{ secrets.DEVIN_API_KEY }}
+          DEVIN_ORG_ID: ${{ secrets.DEVIN_ORG_ID }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ steps.failure.outputs.pr_number }}
+          BRANCH: ${{ steps.failure.outputs.branch }}
+          HEAD_SHA: ${{ steps.failure.outputs.head_sha }}
+          FAILED: ${{ steps.failure.outputs.failed }}
+          RUN_URL: ${{ steps.failure.outputs.run_url }}
+          ATTEMPT: ${{ steps.failure.outputs.attempt }}
+        run: |
+          set -euo pipefail
+          prompt="CI failed on PR #${PR_NUMBER} in ${REPO} (branch ${BRANCH}, commit ${HEAD_SHA}). Failed steps: ${FAILED}. Run: ${RUN_URL}. Read the CI logs, identify the root cause, and push a fix commit to the existing branch ${BRANCH} (do not open a new PR). Run the same checks locally before pushing. Then comment on PR #${PR_NUMBER} with the root cause and what you changed. If the failure is not caused by the code (flaky test, infrastructure), do not push; comment on the PR explaining what you found."
+          body=$(jq -n \
+            --arg prompt "$prompt" \
+            --arg title "CI fix: ${REPO}#${PR_NUMBER} (attempt ${ATTEMPT})" \
+            --arg pr "pr-${PR_NUMBER}" \
+            '{prompt: $prompt, title: $title, tags: ["ci-fix", $pr]}')
+          response=$(curl -sS --fail-with-body -X POST \
+            "https://api.devin.ai/v3/organizations/${DEVIN_ORG_ID}/sessions" \
+            -H "Authorization: Bearer ${DEVIN_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$body")
+          url=$(jq -r '.url // empty' <<<"$response")
+          echo "Devin session: ${url:-<no url in response>}"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on PR
+        if: steps.devin.outcome == 'success'
+        uses: actions/github-script@v7
+        env:
+          SESSION_URL: ${{ steps.devin.outputs.url }}
+          FAILED: ${{ steps.failure.outputs.failed }}
+          ATTEMPT: ${{ steps.failure.outputs.attempt }}
+          PR_NUMBER: ${{ steps.failure.outputs.pr_number }}
+        with:
+          script: |
+            const url = process.env.SESSION_URL || '(session URL unavailable)';
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: Number(process.env.PR_NUMBER),
+              body: `${process.env.MARKER}\nCI failed in \`${process.env.FAILED}\`. Started a Devin fix session ` +
+                `(attempt ${process.env.ATTEMPT}/${process.env.MAX_ATTEMPTS}): ${url}`,
+            });
