@@ -1,6 +1,6 @@
 import pytest
 
-from ledger import apply_discount, format_cents, parse_amount
+from ledger import apply_discount, format_cents, parse_amount, split_evenly
 
 
 @pytest.mark.parametrize(
@@ -55,3 +55,7 @@ def test_apply_discount():
 def test_apply_discount_bounds():
     with pytest.raises(ValueError):
         apply_discount(1000, 101)
+
+
+def test_split_evenly():
+    assert split_evenly(900, 3) == [300, 300, 300]

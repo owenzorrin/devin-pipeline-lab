@@ -44,3 +44,11 @@ def apply_discount(subtotal_cents: int, percent: float) -> int:
     factor = Decimal(1) - Decimal(str(percent)) / Decimal(100)
     discounted = Decimal(subtotal_cents) * factor
     return int(discounted.quantize(Decimal("1"), rounding=ROUND_HALF_UP))
+
+
+def split_evenly(total_cents: int, parts: int) -> list[int]:
+    """Split an amount into ``parts`` shares, e.g. for splitting a bill."""
+    if parts <= 0:
+        raise ValueError("parts must be positive")
+    share = round(total_cents / parts)
+    return [share] * parts
