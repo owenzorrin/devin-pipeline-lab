@@ -59,3 +59,15 @@ def test_apply_discount_bounds():
 
 def test_split_evenly():
     assert split_evenly(900, 3) == [300, 300, 300]
+
+
+@pytest.mark.parametrize("total", [1000, 1, 0, -1000, 10**17 + 1])
+def test_split_evenly_preserves_total(total):
+    shares = split_evenly(total, 3)
+    assert sum(shares) == total
+    assert max(shares) - min(shares) <= 1
+
+
+def test_split_evenly_rejects_no_parts():
+    with pytest.raises(ValueError):
+        split_evenly(100, 0)

@@ -50,5 +50,5 @@ def split_evenly(total_cents: int, parts: int) -> list[int]:
     """Split an amount into ``parts`` shares, e.g. for splitting a bill."""
     if parts <= 0:
         raise ValueError("parts must be positive")
-    share = round(total_cents / parts)
-    return [share] * parts
+    share, remainder = divmod(total_cents, parts)
+    return [share + (i < remainder) for i in range(parts)]
